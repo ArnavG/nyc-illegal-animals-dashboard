@@ -1,3 +1,5 @@
+# Dashboard Public URL (via Netlify): https://nyc-illegal-animal-complaints.netlify.app/
+
 # Svelte + Vite
 
 This template should help get you started developing with Svelte in Vite.
