@@ -389,8 +389,8 @@
         <h2>{mapMode === 'borough' ? 'Complaints by Borough' : 'Neighborhood Map'}</h2>
         <h5>
           {mapMode === 'borough'
-            ? `Hover over a borough to see its count. Click to filter. ${colorMode === 'relative' ? 'Relative scale.' : 'Fixed scale.'}`
-            : `Hover over a neighborhood to see its count. Click to filter. Pinch to zoom. ${colorMode === 'relative' ? 'Relative scale.' : 'Fixed scale.'}`}
+            ? `Hover to see counts. Click to filter. ${colorMode === 'relative' ? 'Relative scale.' : 'Fixed scale.'}`
+            : `Hover to see counts. Click to filter. Pinch to zoom. ${colorMode === 'relative' ? 'Relative scale.' : 'Fixed scale.'}`}
         </h5>
 
         <div class="map-mode-buttons">
