@@ -1,18 +1,21 @@
 <script>
   import * as d3 from 'd3';
-  import { onMount, tick } from 'svelte';
+  import { onMount } from 'svelte';
   import Header from './lib/Header.svelte';
   import ActiveFilters from './lib/ActiveFilters.svelte';
   import BarChart from './lib/BarChart.svelte';
   import MonthFilter from './lib/MonthFilter.svelte';
-  import { parseDate, monthFormat, monthLabel, toggleSelection, ntaName, findNeighborhood } from './lib/helpers.js';
+  import { parseDate, toggleSelection, ntaName, findNeighborhood } from './lib/helpers.js';
 
   let loading = true;
 
   let data = [];
   let geoData;
   let ntaGeoData;
+
   let mapMode = 'borough';
+  let colorMode = 'absolute';
+
   let selectedAnimals = [];
   let selectedBoroughs = [];
   let selectedStatuses = [];
@@ -20,24 +23,22 @@
   let selectedMonthRange = [];
   let startMonth = '';
   let endMonth = '';
+
   let hoveredBorough = '';
   let hoveredNeighborhood = '';
   let tooltipX = 0;
   let tooltipY = 0;
+
   let mapZoomGroup;
   let mapZoomBehavior;
+  let mapZoomReady = false;
 
   let statusWidth = 470;
   let statusHeight = 170;
   let statusMargin = { top: 12, right: 70, bottom: 15, left: 90 };
 
-  let timeWidth = 800;
-  let timeHeight = 260;
-  let timeMargin = { top: 20, right: 40, bottom: 40, left: 50 };
-
   let mapWidth = 540;
   let mapHeight = 380;
-
 
   const animalBaseColor = 'steelblue';
   const animalActiveColor = '#2f5f8f';
@@ -45,15 +46,12 @@
   const statusBaseColor = 'purple';
   const statusActiveColor = '#4f1268';
 
+  const fixedMapMax = 1300;
+  const fixedNeighborhoodMax = 125;
 
   let width = 500;
   let height = 230;
   let margin = { top: 12, right: 120, bottom: 12, left: 160 };
-
-  $: animalCounts = Array.from(
-    d3.rollup(animalChartData, v => v.length, d => d.animal),
-    ([animal, count]) => ({ animal, count })
-  ).sort((a, b) => b.count - a.count);
 
   $: filteredData = data.filter(d => {
     if (selectedAnimals.length && !selectedAnimals.includes(d.animal)) return false;
@@ -80,7 +78,6 @@
     return true;
   });
 
-
   $: boroughChartData = data.filter(d => {
     if (selectedAnimals.length && !selectedAnimals.includes(d.animal)) return false;
     if (selectedStatuses.length && !selectedStatuses.includes(d.status)) return false;
@@ -93,6 +90,8 @@
     return true;
   });
 
+  // Neighborhood map colors should not collapse to zero when neighborhoods are selected.
+  // This lets unselected neighborhoods keep their original filtered base color, then fade by opacity.
   $: neighborhoodChartData = data.filter(d => {
     if (selectedAnimals.length && !selectedAnimals.includes(d.animal)) return false;
     if (selectedBoroughs.length && !selectedBoroughs.includes(d.borough)) return false;
@@ -104,7 +103,6 @@
 
     return true;
   });
-
 
   $: statusChartData = data.filter(d => {
     if (selectedAnimals.length && !selectedAnimals.includes(d.animal)) return false;
@@ -127,6 +125,21 @@
     return true;
   });
 
+  $: animalCounts = Array.from(
+    d3.rollup(animalChartData, v => v.length, d => d.animal),
+    ([animal, count]) => ({ animal, count })
+  ).sort((a, b) => b.count - a.count);
+
+  $: statusCounts = Array.from(
+    d3.rollup(statusChartData, v => v.length, d => d.status),
+    ([status, count]) => ({ status, count })
+  ).sort((a, b) => b.count - a.count);
+
+  $: monthCounts = Array.from(
+    d3.rollup(timeChartData, v => v.length, d => +d.month),
+    ([month, count]) => ({ month: new Date(+month), count })
+  ).sort((a, b) => a.month - b.month);
+
   $: mapBoroughCounts = d3.rollup(
     boroughChartData,
     v => v.length,
@@ -139,24 +152,32 @@
     d => d.neighborhood
   );
 
-  $: maxNeighborhoodCount = d3.max(Array.from(mapNeighborhoodCounts.values())) || 0;
+  $: relativeMapMax = d3.max(Array.from(mapBoroughCounts.values())) || 0;
+  $: relativeNeighborhoodMax = d3.max(Array.from(mapNeighborhoodCounts.values())) || 0;
 
-  $: neighborhoodColorScale = d3.scaleSequential(d3.interpolateYlOrRd)
-    .domain([0, maxNeighborhoodCount]);
+  $: mapScaleMax = colorMode === 'absolute'
+    ? fixedMapMax
+    : relativeMapMax;
 
-
-  $: maxMapCount = d3.max(Array.from(mapBoroughCounts.values())) || 0;
+  $: neighborhoodScaleMax = colorMode === 'absolute'
+    ? fixedNeighborhoodMax
+    : relativeNeighborhoodMax;
 
   $: mapColorScale = d3.scaleSequential(d3.interpolateYlOrRd)
-    .domain([0, maxMapCount]);
+    .domain([0, mapScaleMax || 1])
+    .clamp(true);
 
-  $: legendValues = maxMapCount
-    ? d3.range(0, 6).map(i => Math.round((maxMapCount / 5) * i))
-    : [0, 1, 2, 3, 4, 5];
-  
-  $: neighborhoodLegendValues = maxNeighborhoodCount
-    ? d3.range(0, 6).map(i => Math.round((maxNeighborhoodCount / 5) * i))
-    : [0, 1, 2, 3, 4, 5];
+  $: neighborhoodColorScale = d3.scaleSequential(d3.interpolateYlOrRd)
+    .domain([0, neighborhoodScaleMax || 1])
+    .clamp(true);
+
+  $: legendValues = d3.range(0, 6).map(i =>
+    Math.round(((mapScaleMax || 1) / 5) * i)
+  );
+
+  $: neighborhoodLegendValues = d3.range(0, 6).map(i =>
+    Math.round(((neighborhoodScaleMax || 1) / 5) * i)
+  );
 
   $: chartWidth = width - margin.left - margin.right;
   $: chartHeight = height - margin.top - margin.bottom;
@@ -170,11 +191,6 @@
     .range([0, chartHeight])
     .padding(0.2);
 
-  $: statusCounts = Array.from(
-    d3.rollup(statusChartData, v => v.length, d => d.status),
-    ([status, count]) => ({ status, count })
-  ).sort((a, b) => b.count - a.count);
-
   $: statusChartWidth = statusWidth - statusMargin.left - statusMargin.right;
   $: statusChartHeight = statusHeight - statusMargin.top - statusMargin.bottom;
 
@@ -187,11 +203,6 @@
     .range([0, statusChartHeight])
     .padding(0.2);
 
-  $: monthCounts = Array.from(
-    d3.rollup(timeChartData, v => v.length, d => +d.month),
-    ([month, count]) => ({ month: new Date(+month), count })
-  ).sort((a, b) => a.month - b.month);
-
   $: currentMapGeo = mapMode === 'neighborhood' && ntaGeoData
     ? ntaGeoData
     : geoData;
@@ -203,12 +214,11 @@
   $: pathGenerator = projection
     ? d3.geoPath().projection(projection)
     : null;
-  
-  $: if (mapZoomGroup && mapMode === 'neighborhood') {
+
+  $: if (mapZoomGroup && mapMode === 'neighborhood' && !mapZoomReady) {
     setupMapZoom();
+    mapZoomReady = true;
   }
-
-
 
   $: activeFilters = [
     selectedAnimals.length ? `Animal: ${selectedAnimals.join(', ')}` : '',
@@ -241,12 +251,14 @@
 
     geoData = await d3.json('/nyc-boroughs.geojson');
     ntaGeoData = await d3.json('/nyc-ntas.geojson');
+
     data = loadedRows.map((d) => {
       return {
         ...d,
         neighborhood: findNeighborhood(d, ntaGeoData)
       };
     });
+
     loading = false;
   });
 
@@ -264,13 +276,11 @@
     return feature.properties.name.toUpperCase();
   }
 
-  function boroughCount(name) {
-    return mapBoroughCounts.get(name) || 0;
-  }
-
-
-  function neighborhoodCount(name) {
-    return mapNeighborhoodCounts.get(name) || 0;
+  function moveTooltip(event, feature) {
+    const [x, y] = d3.pointer(event);
+    hoveredBorough = boroughName(feature);
+    tooltipX = Math.min(x + 12, mapWidth - 180);
+    tooltipY = Math.max(y - 12, 12);
   }
 
   function moveNeighborhoodTooltip(event, feature) {
@@ -280,15 +290,21 @@
     tooltipY = Math.max(y - 12, 12);
   }
 
+  function switchToBoroughMap() {
+    mapMode = 'borough';
+    mapZoomGroup = null;
+    mapZoomReady = false;
+  }
 
-  function moveTooltip(event, feature) {
-    const [x, y] = d3.pointer(event);
-    hoveredBorough = boroughName(feature);
-    tooltipX = Math.min(x + 12, mapWidth - 180);
-    tooltipY = Math.max(y - 12, 12);
+  function switchToNeighborhoodMap() {
+    mapMode = 'neighborhood';
+    mapZoomGroup = null;
+    mapZoomReady = false;
   }
 
   function setupMapZoom() {
+    if (!mapZoomGroup) return;
+
     const svg = d3.select(mapZoomGroup.ownerSVGElement);
 
     mapZoomBehavior = d3.zoom()
@@ -328,12 +344,9 @@
       .duration(250)
       .call(mapZoomBehavior.transform, d3.zoomIdentity);
   }
-
-
 </script>
 
 <main>
-
   <Header filteredCount={filteredData.length} totalCount={data.length} />
 
   {#if loading}
@@ -341,117 +354,123 @@
       Loading complaint data and neighborhood boundaries...
     </section>
   {:else}
+    <MonthFilter
+      {monthCounts}
+      {selectedMonthRange}
+      {startMonth}
+      {endMonth}
+      setMonthRange={(value) => selectedMonthRange = value}
+      setStartMonth={(value) => startMonth = value}
+      setEndMonth={(value) => endMonth = value}
+    />
 
-  <MonthFilter
-    {monthCounts}
-    {selectedMonthRange}
-    {startMonth}
-    {endMonth}
-    setMonthRange={(value) => selectedMonthRange = value}
-    setStartMonth={(value) => startMonth = value}
-    setEndMonth={(value) => endMonth = value}
-  />
+    <ActiveFilters {activeFilters} {resetFilters} />
 
-  <ActiveFilters {activeFilters} {resetFilters} />
-
-  <div class="dashboard">
-    <div class="animal-box">
-      <BarChart
-        boxClass="animal-box"
-        title="Complaints by Animal Type"
-        rows={animalCounts}
-        selectedValues={selectedAnimals}
-        {width}
-        {height}
-        {margin}
-        xScale={xScale}
-        yScale={yScale}
-        baseColor={animalBaseColor}
-        activeColor={animalActiveColor}
-        valueKey="animal"
-        toggleValue={(value) => selectedAnimals = toggleSelection(selectedAnimals, value)}
-      />
-    </div>
-
-
-    <section class="chart-box map-box">
-      <h2>{mapMode === 'borough' ? 'Complaints by Borough' : 'Neighborhood Map'}</h2>
-      <h5>
-        {mapMode === 'borough'
-          ? 'Hover over a borough to see its count. Click to filter.'
-          : 'Hover over a neighborhood to see its count. Click to filter. Pinch to zoom.'}
-      </h5>
-
-      <div class="map-mode-buttons">
-        <button
-          class:active-map-mode={mapMode === 'borough'}
-          on:click={() => {
-            mapMode = 'borough';
-            mapZoomGroup = null;
-          }}
-        >
-          Borough
-        </button>
-
-        <button
-          class:active-map-mode={mapMode === 'neighborhood'}
-          on:click={() => {
-            mapMode = 'neighborhood';
-            mapZoomGroup = null;
-          }}
-        >
-          Neighborhood
-        </button>
+    <div class="dashboard">
+      <div class="animal-box">
+        <BarChart
+          boxClass="animal-box"
+          title="Complaints by Animal Type"
+          rows={animalCounts}
+          selectedValues={selectedAnimals}
+          {width}
+          {height}
+          {margin}
+          xScale={xScale}
+          yScale={yScale}
+          baseColor={animalBaseColor}
+          activeColor={animalActiveColor}
+          valueKey="animal"
+          toggleValue={(value) => selectedAnimals = toggleSelection(selectedAnimals, value)}
+        />
       </div>
 
+      <section class="chart-box map-box">
+        <h2>{mapMode === 'borough' ? 'Complaints by Borough' : 'Neighborhood Map'}</h2>
+        <h5>
+          {mapMode === 'borough'
+            ? `Hover over a borough to see its count. Click to filter. ${colorMode === 'relative' ? 'Relative scale.' : 'Fixed scale.'}`
+            : `Hover over a neighborhood to see its count. Click to filter. Pinch to zoom. ${colorMode === 'relative' ? 'Relative scale.' : 'Fixed scale.'}`}
+        </h5>
 
+        <div class="map-mode-buttons">
+          <button
+            class:active-map-mode={mapMode === 'borough'}
+            on:click={switchToBoroughMap}
+          >
+            Borough
+          </button>
 
-      {#if currentMapGeo && pathGenerator}
-        <svg width={mapWidth} height={mapHeight}>
-          {#if mapMode === 'borough'}
-            {#each geoData.features as feature}
-              <path
-                d={pathGenerator(feature)}
-                fill={mapColorScale(boroughCount(boroughName(feature)))}
-                opacity={selectedBoroughs.length && !selectedBoroughs.includes(boroughName(feature)) ? 0.25 : 1}
-                stroke="white"
-                on:click={() => {
-                  selectedBoroughs = toggleSelection(selectedBoroughs, boroughName(feature));
-                  selectedNeighborhoods = [];
-                }}
-                on:mousemove={(event) => moveTooltip(event, feature)}
-                on:mouseleave={() => hoveredBorough = ''}
-              />
-            {/each}
+          <button
+            class:active-map-mode={mapMode === 'neighborhood'}
+            on:click={switchToNeighborhoodMap}
+          >
+            Neighborhood
+          </button>
+        </div>
 
-            {#if hoveredBorough}
-              <g transform="translate({tooltipX}, {tooltipY})" class="map-tooltip">
-                <rect width="165" height="54" rx="4" />
-                <text x="10" y="21">{hoveredBorough}</text>
-                <text x="10" y="40">{boroughCount(hoveredBorough)} complaints</text>
-              </g>
-            {/if}
+        <div class="map-mode-buttons scale-mode-buttons">
+          <button
+            class:active-map-mode={colorMode === 'relative'}
+            on:click={() => colorMode = 'relative'}
+          >
+            Relative
+          </button>
 
-            <g transform="translate({mapWidth - 340}, {mapHeight - 38})">
-              <text x="0" y="-8" font-size="12">Complaints</text>
+          <button
+            class:active-map-mode={colorMode === 'absolute'}
+            on:click={() => colorMode = 'absolute'}
+          >
+            Absolute
+          </button>
+        </div>
 
-              {#each legendValues.slice(0, -1) as value, i}
-                <rect
-                  x={i * 42}
-                  y="0"
-                  width="42"
-                  height="12"
-                  fill={mapColorScale(value)}
+        {#if currentMapGeo && pathGenerator}
+          <svg width={mapWidth} height={mapHeight}>
+            {#if mapMode === 'borough'}
+              {#each geoData.features as feature}
+                <path
+                  d={pathGenerator(feature)}
+                  fill={mapColorScale(mapBoroughCounts.get(boroughName(feature)) || 0)}
+                  opacity={selectedBoroughs.length && !selectedBoroughs.includes(boroughName(feature)) ? 0.25 : 1}
+                  stroke="white"
+                  on:click={() => {
+                    selectedBoroughs = toggleSelection(selectedBoroughs, boroughName(feature));
+                    selectedNeighborhoods = [];
+                  }}
+                  on:mousemove={(event) => moveTooltip(event, feature)}
+                  on:mouseleave={() => hoveredBorough = ''}
                 />
-                <text x={i * 42} y="30" font-size="11">{value}</text>
               {/each}
-            </g>
+
+              {#if hoveredBorough}
+                <g transform="translate({tooltipX}, {tooltipY})" class="map-tooltip">
+                  <rect width="165" height="54" rx="4" />
+                  <text x="10" y="21">{hoveredBorough}</text>
+                  <text x="10" y="40">{mapBoroughCounts.get(hoveredBorough) || 0} complaints</text>
+                </g>
+              {/if}
+
+              <g transform="translate({mapWidth - 340}, {mapHeight - 38})">
+                <text x="0" y="-8" font-size="12">Complaints</text>
+
+                {#each legendValues.slice(0, -1) as value, i}
+                  <rect
+                    x={i * 42}
+                    y="0"
+                    width="42"
+                    height="12"
+                    fill={mapColorScale(value)}
+                  />
+                  <text x={i * 42} y="30" font-size="11">{value}</text>
+                {/each}
+              </g>
             {:else}
               <g bind:this={mapZoomGroup}>
                 {#each ntaGeoData.features as feature}
                   <path
                     d={pathGenerator(feature)}
-                    fill={neighborhoodColorScale(neighborhoodCount(ntaName(feature)))}
+                    fill={neighborhoodColorScale(mapNeighborhoodCounts.get(ntaName(feature)) || 0)}
                     opacity={selectedNeighborhoods.length && !selectedNeighborhoods.includes(ntaName(feature)) ? 0.4 : 1}
                     stroke="white"
                     stroke-width="0.6"
@@ -469,7 +488,7 @@
                 <g transform="translate({tooltipX}, {tooltipY})" class="map-tooltip">
                   <rect width="205" height="54" rx="4" />
                   <text x="10" y="21">{hoveredNeighborhood}</text>
-                  <text x="10" y="40">{neighborhoodCount(hoveredNeighborhood)} complaints</text>
+                  <text x="10" y="40">{mapNeighborhoodCounts.get(hoveredNeighborhood) || 0} complaints</text>
                 </g>
               {/if}
 
@@ -498,7 +517,7 @@
 
                 <g class="svg-zoom-button" transform="translate(0, 36)" on:click={zoomOutMap}>
                   <rect x="0" y="0" width="44" height="30" rx="6" />
-                  <text x="22" y="20" text-anchor="middle">−</text>
+                  <text x="22" y="20" text-anchor="middle">-</text>
                 </g>
 
                 <g class="svg-zoom-button" transform="translate(0, 72)" on:click={resetMapZoom}>
@@ -509,29 +528,28 @@
             {/if}
           </svg>
         {/if}
-    </section>
+      </section>
 
-    <div class="status-box">
-      <BarChart
-        boxClass="status-box"
-        title="Complaints by Status"
-        rows={statusCounts}
-        selectedValues={selectedStatuses}
-        width={statusWidth}
-        height={statusHeight}
-        margin={statusMargin}
-        xScale={statusXScale}
-        yScale={statusYScale}
-        baseColor={statusBaseColor}
-        activeColor={statusActiveColor}
-        valueKey="status"
-        labelFontSize={11}
-        toggleValue={(value) => selectedStatuses = toggleSelection(selectedStatuses, value)}
-      />
+      <div class="status-box">
+        <BarChart
+          boxClass="status-box"
+          title="Complaints by Status"
+          rows={statusCounts}
+          selectedValues={selectedStatuses}
+          width={statusWidth}
+          height={statusHeight}
+          margin={statusMargin}
+          xScale={statusXScale}
+          yScale={statusYScale}
+          baseColor={statusBaseColor}
+          activeColor={statusActiveColor}
+          valueKey="status"
+          labelFontSize={11}
+          toggleValue={(value) => selectedStatuses = toggleSelection(selectedStatuses, value)}
+        />
+      </div>
     </div>
-
-  </div>
-{/if}
+  {/if}
 
   <style>
     main {
@@ -551,10 +569,6 @@
       background: white;
     }
 
-    .summary button {
-      margin-top: 58px;
-    }
-
     .dashboard {
       display: grid;
       grid-template-columns: 0.9fr 1.1fr;
@@ -565,6 +579,17 @@
       align-items: stretch;
     }
 
+    .chart-box {
+      border: 1px solid #ddd;
+      padding: 10px;
+      background: white;
+    }
+
+    .chart-box h2 {
+      margin-top: 0;
+      margin-bottom: 6px;
+      text-align: center;
+    }
 
     .animal-box {
       grid-area: animal;
@@ -572,12 +597,14 @@
 
     .map-box {
       grid-area: map;
+      padding-bottom: 18px;
     }
 
-    .map-box p {
+    .map-box h5 {
       text-align: center;
-      margin-top: -4px;
-      margin-bottom: 4px;
+      margin-top: 18px;
+      margin-bottom: 12px;
+      color: #666;
     }
 
     .status-box {
@@ -593,7 +620,6 @@
       cursor: pointer;
     }
 
-
     path:hover {
       stroke: black;
       stroke-width: 2;
@@ -602,7 +628,6 @@
     .map-tooltip {
       pointer-events: none;
     }
-
 
     .map-tooltip rect {
       fill: #171722;
@@ -616,66 +641,71 @@
       pointer-events: none;
     }
 
-  button {
-    background: white;
-    border: 1px solid #b8c1cc;
-    border-radius: 6px;
-    color: #222;
-    cursor: pointer;
-    font: inherit;
-    padding: 6px 12px;
-  }
+    button {
+      background: white;
+      border: 1px solid #b8c1cc;
+      border-radius: 6px;
+      color: #222;
+      cursor: pointer;
+      font: inherit;
+      padding: 6px 12px;
+    }
 
-  button:hover {
-    border-color: #555;
-    background: #f6f6f6;
-  }
+    button:hover {
+      border-color: #555;
+      background: #f6f6f6;
+    }
 
-  button:active {
-    background: #eeeeee;
-  }
+    button:active {
+      background: #eeeeee;
+    }
 
-  @media (max-width: 800px) {
-  }
+    .map-mode-buttons {
+      display: flex;
+      justify-content: center;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
 
-  .map-mode-buttons {
-    display: flex;
-    justify-content: center;
-    gap: 8px;
-    margin-bottom: 8px;
-  }
+    .scale-mode-buttons {
+      margin-top: -2px;
+      margin-bottom: 8px;
+    }
 
-  .active-map-mode {
-    background: #eeeeee;
-    border-color: #555;
-  }
+    .scale-mode-buttons button {
+      font-size: 13px;
+      padding: 4px 10px;
+    }
 
-  .svg-zoom-controls text {
-    fill: #666;
-    font-size: 11px;
-    pointer-events: none;
-  }
+    .active-map-mode {
+      background: #eeeeee;
+      border-color: #555;
+    }
 
-  .svg-zoom-button {
-    cursor: pointer;
-  }
+    .svg-zoom-controls text {
+      fill: #666;
+      font-size: 11px;
+      pointer-events: none;
+    }
 
-  .svg-zoom-button rect {
-    fill: white;
-    stroke: #b8c1cc;
-  }
+    .svg-zoom-button {
+      cursor: pointer;
+    }
 
-  .svg-zoom-button:hover rect {
-    fill: #f6f6f6;
-    stroke: #555;
-  }
+    .svg-zoom-button rect {
+      fill: white;
+      stroke: #b8c1cc;
+    }
 
-  .svg-zoom-button text {
-    fill: #222;
-    font-size: 12px;
-    pointer-events: none;
-  }
+    .svg-zoom-button:hover rect {
+      fill: #f6f6f6;
+      stroke: #555;
+    }
 
-
+    .svg-zoom-button text {
+      fill: #222;
+      font-size: 12px;
+      pointer-events: none;
+    }
   </style>
 </main>
